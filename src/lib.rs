@@ -247,6 +247,7 @@ static mut G_CALC_FUNC_SETS: [PluginTCalcFuncInfo; 4] = [
     },
 ];
 
+// nifx 向通达信注册回调函数 TDXDLL2
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub unsafe extern "C" fn RegisterTdxFunc(pFun: *mut *mut PluginTCalcFuncInfo) -> c_int {
