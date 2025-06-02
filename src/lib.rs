@@ -72,7 +72,7 @@ impl ZigzagConfig {
         let mut pivot_position = false;
         let mut pole_value_mode = false;
         let mut pole_edge_mode = false;
-        let mode_value = mode % 1000 / 100;
+        let mode_value = mode % 1000 / 100; // {获取转折点类型，笔、段、走势高低点}
         if pivot {
             signal = mode_value == 4;
             zd = mode_value == 3;
@@ -194,15 +194,23 @@ pub unsafe extern "C" fn pivot(DataLen: c_int, pfOUT: *mut c_float, pfINa_high: 
 }
 
 pub unsafe extern "C" fn pivot_new(DataLen: c_int, pfOUT: *mut c_float, pfINa_high: *mut c_float, pfINb_low: *mut c_float, mode: *mut c_float) {
+    // 解析配置参数
     let config = ZigzagConfig::new(*mode as i32, true);
+    // 根据配置和输入数据初始化市场数据
     let market = Market::with_bi_mode(DataLen as usize, pfINa_high, pfINb_low, config.bi_mode);
+    // 获取极点信息
     let mut poles = market.tracer.poles();
+    // 如果是段模式，需要对极点进行标记（stain）
     if config.pivot_mode == PivotMode::DUAN {
         market.stain_duan(&mut poles);
     }
+    // 创建枢轴点查找器实例
     let finder = PivotFinder::new();
+    // 查找枢轴点（中枢）入口
     let entries = finder.find(&poles);
+    // 遍历每个枢轴点入口
     for entry in entries {
+        // 如果配置要求输出信号
         if config.signal {
             if let Some(signals) = entry.signals {
                 for (index, signal) in signals.iter() {
@@ -211,15 +219,21 @@ pub unsafe extern "C" fn pivot_new(DataLen: c_int, pfOUT: *mut c_float, pfINa_hi
             }
             continue;
         }        
+        // 如果存在枢轴点，则根据配置输出不同的枢轴点信息
         if let Some(pivot) = entry.pivot {
+            // 输出中枢的最高值（zg）到对应区间
             if config.zg {
                 for i in pivot.start()..=pivot.end() {
+                    // 如果中枢扩展，则输出负值
                     *pfOUT.offset(i as isize) = pivot.high() as c_float * if pivot.extended { -1. } else { 1. };
                 }
+            // 输出中枢的最低值（zd）到对应区间
             } else if config.zd {
                 for i in pivot.start()..=pivot.end() {
+                    // 如果中枢扩展，则输出负值
                     *pfOUT.offset(i as isize) = pivot.low() as c_float * if pivot.extended { -1. } else { 1. };
                 }
+            // 输出中枢的位置（用-2和2标记中枢的起点和终点）
             } else if config.pivot_position {
                 *pfOUT.offset(pivot.start() as isize) = -2.;
                 *pfOUT.offset(pivot.end() as isize) = 2.;

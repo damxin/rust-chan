@@ -904,7 +904,7 @@ impl Tracer {
         Self { strokes, bi_mode: BiMode { cigao: false, quekou: false} }
     }
 
-    // 根据K线及前后关系逐一扫描进行粉笔
+    // 根据K线及前后关系逐一扫描进行分笔
     // merged 为 true 表示K线包含
     // gap 为 true 表示有缺口
     // up 为 true 表示与前K线相比的方向向上
@@ -1035,14 +1035,28 @@ impl Tracer {
     }
 
     // 获取分笔完成后的所有笔极点
+    //
+    // 本函数将遍历所有已完成的笔并生成极点。一个笔的起点和终点（如果笔完成）各生成一个极点。
+    //
+    // 步骤：
+    // 1. 从笔序列中跳过未完成的笔，然后取所有已完成的笔。
+    // 2. 将每个已完成的笔的起点转换为极点（根据笔的方向决定是峰还是谷）。
+    // 3. 如果最后一笔已完成（即count>=STEPS），则将其终点也作为一个极点添加。
+    //
+    // 返回: 由极点组成的向量
     pub fn poles(&self) -> Vec<Pole> {
+        // 获取所有已完成的笔（跳过开头的未完成笔，直到遇到第一个完成的笔，然后连续取后续所有完成的笔）
         let valid_strokes = self.strokes.iter()
         .skip_while(|p| !p.done())
         .take_while(|p| p.done()).collect::<Vec<_>>();
+
+        // 初始化结果向量: 每个笔的起点生成一个极点
         let mut result: Vec<Pole> = valid_strokes
             .iter()
             .map(|stroke| Pole::new(stroke.index, Edge::from(stroke.up), stroke.start(), false))
             .collect();
+
+        // 如果最后一笔已完成，则将其终点作为一个极点加入结果
         if let Some(last) = valid_strokes.last() {
             if last.count >= STEPS {
                 result.push(Pole::new(last.end_index, Edge::from(!last.up), last.stop(), false));
@@ -1065,18 +1079,32 @@ pub struct Market<'a> {
 }
 
 // 根据合并关系获取前笔高低值
+//
+// 参数说明：
+//   values: 价格数组（最高价或最低价）
+//   index: K线合并关系数组，元素的值表示该K线属于哪一个合并段（负值表示合并段顶点，绝对值递增）
+//   i: 当前K线索引
+//   up: 方向（true为向上，false为向下）
+//
+// 返回值：合并方向上（向上取高点、向下取低点）的前笔高低值
 #[inline]
 fn get_prev_value(values: &[f32], index: &Vec<i8>, i: usize, up: bool) -> f32 {
+    // 初始化当前值为当前K线对应的值
     let mut value = values[i];
+    // 当前K线的合并标记
     let mut last_mi = index[i];
+    // 从当前K线向前遍历
     for j in (0..=i).rev() {
+        // 如果遇到合并关系标记为负值（新合并段）或者标记大于上次的标记（已经离开当前合并段），则停止
         if index[j] < 0 || index[j] > last_mi {
             break;
         }
         let curr_value = values[j];
+        // 根据方向更新值：若为向上，则取更高值；若为向下，则取更低值
         if (curr_value > value && up) || (curr_value < value && !up) {
             value = curr_value;
         }
+        // 更新合并标记
         last_mi = index[j];
     }
     value
@@ -1088,37 +1116,47 @@ impl Market<'_> {
     }
     
     pub fn with_bi_mode(len: usize, high: *mut f32, low: *mut f32, bi_mode: BiMode) -> Self {
+        // 创建一个结构体实例，命名为 `result`，可变绑定 (`mut`)
         let mut result = Self {
-            high: unsafe { std::slice::from_raw_parts_mut(high, len) },
-            low: unsafe { std::slice::from_raw_parts_mut(low, len) },
+            high: unsafe { std::slice::from_raw_parts_mut(high, len) }, // 将裸指针 `high` 转换为可变切片（长度为 `len`）
+            low: unsafe { std::slice::from_raw_parts_mut(low, len) },  // 将裸指针 `low` 转换为可变切片（长度为 `len`）
             len,
-            merged_index: vec![-1; len],
-            tracer: Tracer::with_bi_mode(len / 7, bi_mode),
-            fx_indexes: HashMap::new(),
+            merged_index: vec![-1; len], // 创建一个长度为 `len` 的 Vec，所有元素初始化为 -1
+            tracer: Tracer::with_bi_mode(len / 7, bi_mode), // 创建 `Tracer` 实例，根据笔模式，初始容量为 len/7
+            fx_indexes: HashMap::new(),  // 创建空的分型位置字典
         };
 
+        // 执行 K 线合并
         result.merge();
+        // 将合并后的最高价和最低价存储在局部变量中，避免多次引用
         let mhigh = result.high;
         let mlow = result.low;
+        // 获取合并索引的引用
         let merged_index = &result.merged_index;
+        // 遍历 tracer 中的所有笔（除第一笔外，因为第一笔 index 为 0 不处理）进行处理
         for s in result.tracer.strokes.iter_mut() {
-            if s.index == 0 { continue }
+            if s.index == 0 { continue } // 跳过第一笔（初始笔）
             if s.up {
+                // 对于向上笔，计算其前向下方向的最低点（limit）作为阈值
                 let limit = get_prev_value(mhigh, merged_index, s.index - 1, !s.up);
                 if s.high > limit {
+                    // 如果当前向上笔的高点突破了阈值，则在分型位置字典中将其乘以2（表示强势）
                     if let Some(v) = result.fx_indexes.get(&s.index) {
                         result.fx_indexes.insert(s.index, v * 2);
                     }
                 }
             } else {
+                // 对于向下笔，计算其前向上方向的最高点（limit）作为阈值
                 let limit = get_prev_value(mlow, merged_index,s.index - 1, !s.up);
                 if s.low < limit {
+                    // 如果当前向下笔的低点突破了阈值，则在分型位置字典中将其乘以2（表示强势）
                     if let Some(v) = result.fx_indexes.get(&s.index) {
                         result.fx_indexes.insert(s.index, v * 2);
                     }
                 }
             }
         }
+        // 返回构建好的 Market 实例
         result
     }
 
@@ -1136,65 +1174,89 @@ impl Market<'_> {
 
     // 使用分笔器合并K线并寻找笔顶底
     fn merge(&mut self) {
+        // 确定第一根K线的方向：通过比较初始两根K线的高低点来确定
         let init_high = self.high[0];
         let init_low = self.low[0];
-        let mut up = true;
+        let mut up = true; // 初始假设为向上
+
+        // 寻找第二个K线，直到出现不包含的情况，从而确定方向（上升或下降）
         for i in 1..self.len {
             if self.high[i] > init_high && self.low[i] > init_low {
+                // 第二根K线高点和低点都高于第一根，则为上升
                 break;
             } else if self.high[i] < init_high && self.low[i] < init_low {
-                up = false;
+                up = false; // 第二根K线高点和低点都低于第一根，则为下降
                 break;
             }
         }
+        // 初始化分型记录器，添加第一根K线作为起始笔
         self.tracer
             .update(0, self.high[0], self.low[0], up, false, false);
+
+        // 遍历每一根K线（从索引1开始）
         for i in 1..self.len {
             let mut curr_high = self.high[i];
             let mut curr_low = self.low[i];
-            let prev_high = self.get_prev_high(i - 1, up);
+            // 获取前一K线的有效高点（即经过合并后的前一K线）
+            let prev_high = self.get_prev_high(i - 1, up); // 方向为当前方向，因为当前笔还在延续
             let prev_low = self.get_prev_low(i - 1, up);
-            let mut merged = false;
-            let mut gap = false;
+            let mut merged = false; // 标记当前K线是否与前一K线产生包含关系
+            let mut gap = false;    // 标记当前是否形成跳空缺口
+
+            // 使用模式匹配判断当前K线与前一有效K线的关系：
+            // 上升：当前K线的high和low都高于前一有效K线的high和low？
+            // 下降：当前K线的high和low都低于前一有效K线的high和low？
+            // 否则就是包含关系
             match (
                 curr_high.total_cmp(&prev_high),
                 curr_low.total_cmp(&prev_low),
             ) {
+                // 当前K线完全在上一K线上方：上升
                 (std::cmp::Ordering::Greater, std::cmp::Ordering::Greater) => {
-                    // 上升
+                    // 如果之前是下降笔，则遇到此K线表示下降笔结束，向上转折，记录分型（前一K线为底分型）
                     if !up {
-                        self.fx_indexes.insert(i - 1, -1);
+                        // 记录分型位置（底分型）
+                        self.fx_indexes.insert(i - 1, -1); // 底分型标记为-1
                     }
-                    up = true;
+                    up = true; // 当前为上升笔
+                    // 检查是否形成缺口（当前K线最低价大于前一有效高点的最高价）
                     gap = curr_low > prev_high;
                 }
+                // 当前K线完全在上一K线下方：下降
                 (std::cmp::Ordering::Less, std::cmp::Ordering::Less) => {
-                    // 下降
+                    // 如果之前是上升笔，则遇到此K线表示上升笔结束，向下转折，记录分型（前一K线为顶分型）
                     if up {
-                        self.fx_indexes.insert(i - 1, 1);
+                        self.fx_indexes.insert(i - 1, 1); // 顶分型标记为1
                     }
-                    up = false;
+                    up = false; // 当前为下降笔
+                    // 检查是否形成缺口（当前K线最高价小于前一有效低点的最低价）
                     gap = curr_high < prev_low;
                 }
+                // 包含关系：当前K线的高点不高、低点不低（或者高点不低、低点不高等）
                 _ => {
-                    // 包含
-                    merged = true;
+                    merged = true; // 标记包含
+                    // 在合并关系中，如果前一K线已被合并（合并关系标记大于0），则继续合并
                     if self.merged_index[i - 1] < 0 {
-                        self.merged_index[i - 1] += 1;
+                        self.merged_index[i - 1] += 1; // ？这个逻辑需要再看
                     }
-                    self.merged_index[i] = self.merged_index[i - 1] + 1;
+                    self.merged_index[i] = self.merged_index[i - 1] + 1; // 当前K线的合并级数等于前一级数+1
+
+                    // 包含处理规则：上升时需要将两根K线的最高点合并保留两者最高点，最低点也取最高点（取高高点？实际是取两者高点的最大值，低点的最大值？）
+                    // 下降时则取两者高点最小值，低点最小值？
+                    // 这里重新计算当前K线的high和low值，按照包含规则合并
                     curr_high = if up {
-                        curr_high.max(prev_high)
+                        curr_high.max(prev_high) // 上升取更高
                     } else {
-                        curr_high.min(prev_high)
+                        curr_high.min(prev_high) // 下降取更低
                     };
                     curr_low = if up {
-                        curr_low.max(prev_low)
+                        curr_low.max(prev_low)   // 上升：低点也取二者更高（实际是取高）？这样对后续处理有什么影响？需要理解
                     } else {
-                        curr_low.min(prev_low)
+                        curr_low.min(prev_low)   // 下降：低点取二者更低（取低）
                     };
                 }
             }
+            // 将当前K线（经过包含处理后）更新到分型记录器中
             self.tracer.update(i, curr_high, curr_low, up, merged, gap);
         }
     }
@@ -1252,6 +1314,7 @@ pub enum PivotMode {
 
 impl PivotMode {
     pub fn new(mode: i32) -> Self {
+        // {0 - 笔中枢, 1 - 段中枢, 2 - 走势中枢}
         match mode % 100 / 10 {
             1 => PivotMode::DUAN,
             2 => PivotMode::TREND,
